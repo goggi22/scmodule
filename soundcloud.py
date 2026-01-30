@@ -136,13 +136,14 @@ class SoundCloudMod(loader.Module):
             " the link you received."
         ),
         "no_music": (
-            "<emoji document_id=5778527486270770928>❌</emoji> <b>No music is playing!</b>"
+            "<emoji document_id=5778527486270770928>❌</emoji> <b>No recent tracks found or you're not listening to anything</b>"
         ),
         "err": (
             "<emoji document_id=5778527486270770928>❌</emoji> <b>An error occurred."
             "</b>\n<code>{}</code>"
         ),
         "uploading_banner": "\n\n<emoji document_id=5841359499146825803>🕔</emoji> <i>Uploading banner...</i>",
+        "track_cached": "<emoji document_id=5776375003280838798>✅</emoji> <b>Updated, try .scnow again</b>",
     }
 
     strings_ru = {
@@ -164,16 +165,18 @@ class SoundCloudMod(loader.Module):
             '<emoji document_id=5778168620278354602>🔗</emoji> <a href="{}">Пройдите по этой ссылке</a>, разрешите вход, затем введите <code>.sccode https://...</code> с ссылкой которую вы получили.'
         ),
         "no_music": (
-            "<emoji document_id=5778527486270770928>❌</emoji> <b>Музыка не играет!</b>"
+            "<emoji document_id=5778527486270770928>❌</emoji> <b>Не найдено недавних треков или вы ничего не слушаете</b>"
         ),
         "err": (
             "<emoji document_id=5778527486270770928>❌</emoji> <b>Произошла ошибка."
             "</b>\n<code>{}</code>"
         ),
         "uploading_banner": "\n\n<emoji document_id=5841359499146825803>🕔</emoji> <i>Загрузка баннера...</i>",
+        "track_cached": "<emoji document_id=5776375003280838798>✅</emoji> <b>Обновлено, попробуйте снова .scnow</b>",
     }
 
     def __init__(self):
+        self._current_track = None
         self.config = loader.ModuleConfig(
             loader.ConfigValue(
                 "show_banner",
@@ -184,7 +187,7 @@ class SoundCloudMod(loader.Module):
             loader.ConfigValue(
                 "custom_text",
                 (
-                    "<emoji document_id=6007938409857815902>🎧</emoji> <b>Now playing:</b> {track} — {artist}\n"
+                    "<emoji document_id=6007938409857815902>🎧</emoji> <b>Recent track:</b> {track} — {artist}\n"
                     "<emoji document_id=5877465816030515018>🔗</emoji> <b><a href='{soundcloud_url}'>SoundCloud</a></b>"
                 ),
                 "Custom text, supports {track}, {artist}, {soundcloud_url}, {progress}, {duration} placeholders",
@@ -228,10 +231,11 @@ class SoundCloudMod(loader.Module):
                     )
         return wrapped
 
-
-
-    async def _get_current_track(self):
+    async def _get_current_track(self, force_update=False):
         """Get current playing track from SoundCloud"""
+        if not force_update and self._current_track:
+            return self._current_track
+            
         oauth_token = self.config["oauth_token"]
         headers = {
             "Authorization": f"OAuth {oauth_token}",
@@ -240,9 +244,10 @@ class SoundCloudMod(loader.Module):
         
         # Try multiple endpoints to find tracks
         endpoints = [
-            "https://api-v2.soundcloud.com/me/play-history/tracks",
-            "https://api-v2.soundcloud.com/me/library/history",
-            "https://api.soundcloud.com/me/favorites"
+            "https://api-v2.soundcloud.com/me/play-history/tracks?limit=1",
+            "https://api-v2.soundcloud.com/me/library/history?limit=1", 
+            "https://api-v2.soundcloud.com/stream?limit=1",
+            "https://api.soundcloud.com/me/favorites?limit=1"
         ]
         
         for endpoint in endpoints:
@@ -253,7 +258,10 @@ class SoundCloudMod(loader.Module):
                     tracks = data.get("collection", [])
                     if tracks:
                         track_data = tracks[0].get("track") if tracks[0].get("track") else tracks[0]
-                        return self._format_track(track_data)
+                        track = self._format_track(track_data)
+                        if track:
+                            self._current_track = track
+                        return track
             except:
                 continue
         
@@ -269,7 +277,58 @@ class SoundCloudMod(loader.Module):
             "artwork_url": track.get("artwork_url", track["user"].get("avatar_url"))
         }
 
+    async def _extract_track_from_url(self, url):
+        """Extract track info from SoundCloud URL"""
+        oauth_token = self.config["oauth_token"]
+        headers = {"Authorization": f"OAuth {oauth_token}"}
+        
+        try:
+            # Resolve URL to get track ID
+            resolve_url = f"https://api.soundcloud.com/resolve?url={url}"
+            response = requests.get(resolve_url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                track_data = response.json()
+                return self._format_track(track_data)
+        except:
+            pass
+        return None
 
+    @error_handler
+    @tokenized
+    @loader.command(
+        ru_doc="- 🔄 Обновить текущий трек"
+    )
+    async def scupdatecmd(self, message: Message):
+        """- 🔄 Update current track"""
+        self._current_track = None  # Очищаем кэш
+        track = await self._get_current_track(force_update=True)
+        if track:
+            await utils.answer(message, self.strings("track_cached"))
+        else:
+            await utils.answer(message, self.strings("no_music"))
+
+    @loader.watcher("in")
+    async def watcher(self, message):
+        """Auto-cache track from @playinnowbot messages"""
+        if not message.sender_id or message.sender_id != 1271266957:  # @playinnowbot ID
+            return
+            
+        if not message.text:
+            return
+            
+        # Ищем ссылку на SoundCloud в сообщении
+        import re
+        sc_match = re.search(r'https://soundcloud\.com/[^\s]+', message.text)
+        if sc_match:
+            sc_url = sc_match.group(0)
+            # Извлекаем информацию о треке из URL
+            try:
+                track_info = await self._extract_track_from_url(sc_url)
+                if track_info:
+                    self._current_track = track_info
+            except:
+                pass
 
     @error_handler
     @tokenized
@@ -278,7 +337,13 @@ class SoundCloudMod(loader.Module):
     )
     async def scnowcmd(self, message: Message):
         """- 🎧 View current track card."""
+        # Сначала пробуем получить кэшированный трек
         track = await self._get_current_track()
+        
+        # Если нет кэшированного трека, принудительно обновляем
+        if not track:
+            track = await self._get_current_track(force_update=True)
+            
         if not track:
             await utils.answer(message, self.strings("no_music"))
             return
